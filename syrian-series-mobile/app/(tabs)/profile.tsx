@@ -1,10 +1,11 @@
 import { useRouter } from "expo-router";
-import { signOut, updateProfile } from "firebase/auth";
+import type { User } from "firebase/auth";
+import { onAuthStateChanged, signOut, updateProfile } from "firebase/auth";
 import {
   collection,
   getDocs,
-  onSnapshot,
   query,
+  Timestamp,
   where,
 } from "firebase/firestore";
 import { useEffect, useState } from "react";
@@ -26,7 +27,7 @@ type Review = {
   contentId: string;
   text: string;
   rating: number;
-  createdAt: string;
+  createdAt: any; // Handled as Firestore Timestamp or string
 };
 
 type WatchlistItem = {
@@ -48,69 +49,114 @@ type FavoriteItem = {
 
 export default function Profile() {
   const router = useRouter();
-  const user = auth.currentUser;
+
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [displayName, setDisplayName] = useState("");
   const [saving, setSaving] = useState(false);
+
   const [tab, setTab] = useState<"favorites" | "watchlist" | "reviews">(
     "favorites",
   );
+
   const [favorites, setFavorites] = useState<FavoriteItem[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!user) {
-      setLoading(false);
-      return;
-    }
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+      if (!currentUser) {
+        router.replace("/login");
+      }
+    });
+    return unsubscribe;
+  }, []);
 
-    const uid = user.uid;
+  useEffect(() => {
+    if (!user?.uid) return;
+
     setDisplayName(user.displayName || "");
 
-    const favUnsubscribe = onSnapshot(
-      query(collection(db, "favorites"), where("uid", "==", uid)),
-      (snapshot) => {
-        setFavorites(
-          snapshot.docs.map((d) => ({ id: d.id, ...d.data() }) as FavoriteItem),
-        );
-      },
-    );
-
-    const watchUnsubscribe = onSnapshot(
-      query(collection(db, "watchlist"), where("uid", "==", uid)),
-      (snapshot) => {
-        setWatchlist(
-          snapshot.docs.map(
-            (d) => ({ id: d.id, ...d.data() }) as WatchlistItem,
-          ),
-        );
-      },
-    );
-
-    const loadReviews = async () => {
+    const loadData = async () => {
+      setLoading(true);
       try {
-        const snapshot = await getDocs(
-          query(collection(db, "reviews"), where("uid", "==", uid)),
+        const [favSnapshot, watchSnapshot, reviewSnapshot] = await Promise.all([
+          getDocs(
+            query(collection(db, "favorites"), where("uid", "==", user.uid)),
+          ),
+          getDocs(
+            query(collection(db, "watchlist"), where("uid", "==", user.uid)),
+          ),
+          getDocs(
+            query(collection(db, "reviews"), where("uid", "==", user.uid)),
+          ),
+        ]);
+
+        setFavorites(
+          favSnapshot.docs.map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              seriesId: data?.seriesId || "",
+              title: data?.title || "Untitled",
+              image: data?.image || "https://via.placeholder.com/150",
+              rating: Number(data?.rating || 0),
+            };
+          }),
+        );
+
+        setWatchlist(
+          watchSnapshot.docs.map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              contentId: data?.contentId || "",
+              type: data?.type || "series",
+              title: data?.title || "Untitled",
+              image: data?.image || "https://via.placeholder.com/150",
+              addedAt: data?.addedAt || "",
+            };
+          }),
         );
 
         setReviews(
-          snapshot.docs.map((d) => ({ id: d.id, ...d.data() }) as Review),
+          reviewSnapshot.docs.map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              contentId: data?.contentId || "",
+              text: data?.text || "",
+              rating: Number(data?.rating || 0),
+              createdAt: data?.createdAt || null,
+            };
+          }),
         );
-      } catch (error) {
-        console.log(error);
+      } catch (e) {
+        console.error("Profile load error:", e);
       } finally {
         setLoading(false);
       }
     };
 
-    loadReviews();
+    loadData();
+  }, [user?.uid]);
 
-    return () => {
-      favUnsubscribe();
-      watchUnsubscribe();
-    };
-  }, [user]);
+  // Helper to safely format dates from Firestore Timestamps
+  const formatDate = (dateInput: any) => {
+    if (!dateInput) return "";
+    try {
+      const d =
+        dateInput instanceof Timestamp
+          ? dateInput.toDate()
+          : new Date(dateInput);
+      return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+    } catch {
+      return "";
+    }
+  };
 
   async function handleSaveName() {
     if (!user || !displayName.trim()) return;
@@ -118,7 +164,7 @@ export default function Profile() {
     try {
       await updateProfile(user, { displayName: displayName.trim() });
       Alert.alert("Success", "Name updated!");
-    } catch (err) {
+    } catch {
       Alert.alert("Error", "Failed to update name");
     } finally {
       setSaving(false);
@@ -139,18 +185,18 @@ export default function Profile() {
     ]);
   }
 
-  if (!user) return null;
-
-  if (loading)
+  if (authLoading || loading) {
     return (
       <View style={styles.center}>
         <ActivityIndicator color="#db2777" size="large" />
       </View>
     );
+  }
+
+  if (!user) return null;
 
   return (
     <ScrollView style={styles.container}>
-      {/* User Info Card */}
       <View style={styles.userCard}>
         <View style={styles.userHeader}>
           {user.photoURL ? (
@@ -179,14 +225,13 @@ export default function Profile() {
                 style={styles.saveButton}
               >
                 <Text style={styles.saveButtonText}>
-                  {saving ? "Saving..." : "Save"}
+                  {saving ? "..." : "Save"}
                 </Text>
               </TouchableOpacity>
             </View>
             <View style={styles.stats}>
-              <Text style={styles.stat}>{favorites.length} favorites</Text>
+              <Text style={styles.stat}>{favorites.length} favs</Text>
               <Text style={styles.stat}>{reviews.length} reviews</Text>
-              <Text style={styles.stat}>{watchlist.length} watchlist</Text>
             </View>
           </View>
         </View>
@@ -196,123 +241,71 @@ export default function Profile() {
         </TouchableOpacity>
       </View>
 
-      {/* Tabs */}
       <View style={styles.tabs}>
-        <TouchableOpacity
-          onPress={() => setTab("favorites")}
-          style={[styles.tab, tab === "favorites" && styles.activeTab]}
-        >
-          <Text
-            style={[
-              styles.tabText,
-              tab === "favorites" && styles.activeTabText,
-            ]}
+        {(["favorites", "watchlist", "reviews"] as const).map((t) => (
+          <TouchableOpacity
+            key={t}
+            onPress={() => setTab(t)}
+            style={[styles.tab, tab === t && styles.activeTab]}
           >
-            ❤️ Favorites ({favorites.length})
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          onPress={() => setTab("watchlist")}
-          style={[styles.tab, tab === "watchlist" && styles.activeTab]}
-        >
-          <Text
-            style={[
-              styles.tabText,
-              tab === "watchlist" && styles.activeTabText,
-            ]}
-          >
-            🕐 Watchlist ({watchlist.length})
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          onPress={() => setTab("reviews")}
-          style={[styles.tab, tab === "reviews" && styles.activeTab]}
-        >
-          <Text
-            style={[styles.tabText, tab === "reviews" && styles.activeTabText]}
-          >
-            ⭐ Reviews ({reviews.length})
-          </Text>
-        </TouchableOpacity>
+            <Text style={[styles.tabText, tab === t && styles.activeTabText]}>
+              {t.charAt(0).toUpperCase() + t.slice(1)}
+            </Text>
+          </TouchableOpacity>
+        ))}
       </View>
 
-      {/* Content */}
       <View style={styles.content}>
-        {tab === "favorites" &&
-          (favorites.length === 0 ? (
-            <Text style={styles.emptyText}>No favorites yet.</Text>
-          ) : (
-            <View style={styles.grid}>
-              {favorites.map((f) => (
-                <TouchableOpacity
-                  key={f.id}
-                  onPress={() => router.push(`/series/${f.seriesId}`)}
-                  style={styles.gridItem}
-                >
-                  <Image source={{ uri: f.image }} style={styles.gridImage} />
-                  <Text style={styles.gridTitle} numberOfLines={2}>
-                    {f.title}
-                  </Text>
-                  <Text style={styles.gridRating}>
-                    {"★".repeat(Math.round(f.rating))}
-                    {"☆".repeat(5 - Math.round(f.rating))}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          ))}
+        {tab === "favorites" && (
+          <View style={styles.grid}>
+            {favorites.map((f) => (
+              <TouchableOpacity
+                key={f.id}
+                onPress={() => router.push(`/series/${f.seriesId}`)}
+                style={styles.gridItem}
+              >
+                <Image source={{ uri: f.image }} style={styles.gridImage} />
+                <Text style={styles.gridTitle} numberOfLines={1}>
+                  {f.title}
+                </Text>
+                <Text style={styles.gridRating}>{"★".repeat(f.rating)}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
 
-        {tab === "watchlist" &&
-          (watchlist.length === 0 ? (
-            <Text style={styles.emptyText}>Your watchlist is empty.</Text>
-          ) : (
-            <View style={styles.grid}>
-              {watchlist.map((w) => (
-                <TouchableOpacity
-                  key={w.id}
-                  onPress={() =>
-                    router.push(
-                      w.type === "movie"
-                        ? `/movie/${w.contentId}`
-                        : `/series/${w.contentId}`,
-                    )
-                  }
-                  style={styles.gridItem}
-                >
-                  <Image source={{ uri: w.image }} style={styles.gridImage} />
-                  <Text style={styles.gridTitle} numberOfLines={2}>
-                    {w.title}
-                  </Text>
-                  <Text style={styles.gridType}>
-                    {w.type === "movie" ? "🎬 Movie" : "📺 Series"}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          ))}
+        {tab === "watchlist" && (
+          <View style={styles.grid}>
+            {watchlist.map((w) => (
+              <TouchableOpacity
+                key={w.id}
+                onPress={() =>
+                  router.push(
+                    w.type === "movie"
+                      ? `/movie/${w.contentId}`
+                      : `/series/${w.contentId}`,
+                  )
+                }
+                style={styles.gridItem}
+              >
+                <Image source={{ uri: w.image }} style={styles.gridImage} />
+                <Text style={styles.gridTitle} numberOfLines={1}>
+                  {w.title}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
 
         {tab === "reviews" &&
-          (reviews.length === 0 ? (
-            <Text style={styles.emptyText}>No reviews yet.</Text>
-          ) : (
-            reviews.map((r) => (
-              <TouchableOpacity
-                key={r.id}
-                onPress={() => router.push(`/series/${r.contentId}`)}
-                style={styles.reviewCard}
-              >
-                <View style={styles.reviewHeader}>
-                  <Text style={styles.reviewRating}>
-                    {"★".repeat(r.rating)}
-                    {"☆".repeat(5 - r.rating)}
-                  </Text>
-                  <Text style={styles.reviewDate}>
-                    {new Date(r.createdAt).toLocaleDateString()}
-                  </Text>
-                </View>
-                <Text style={styles.reviewText}>{r.text}</Text>
-              </TouchableOpacity>
-            ))
+          reviews.map((r) => (
+            <View key={r.id} style={styles.reviewCard}>
+              <View style={styles.reviewHeader}>
+                <Text style={styles.reviewRating}>{"★".repeat(r.rating)}</Text>
+                <Text style={styles.reviewDate}>{formatDate(r.createdAt)}</Text>
+              </View>
+              <Text style={styles.reviewText}>{r.text}</Text>
+            </View>
           ))}
       </View>
     </ScrollView>
@@ -334,40 +327,39 @@ const styles = StyleSheet.create({
     padding: 16,
   },
   userHeader: { flexDirection: "row", gap: 16, marginBottom: 16 },
-  avatar: { width: 80, height: 80, borderRadius: 40 },
+  avatar: { width: 70, height: 70, borderRadius: 35 },
   avatarPlaceholder: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 70,
+    height: 70,
+    borderRadius: 35,
     backgroundColor: "#db2777",
     alignItems: "center",
     justifyContent: "center",
   },
-  avatarText: { color: "#fff", fontSize: 32, fontWeight: "bold" },
+  avatarText: { color: "#fff", fontSize: 28, fontWeight: "bold" },
   userInfo: { flex: 1 },
-  email: { color: "#a1a1aa", fontSize: 13, marginBottom: 8 },
+  email: { color: "#a1a1aa", fontSize: 12, marginBottom: 4 },
   nameRow: { flexDirection: "row", gap: 8, marginBottom: 8 },
   nameInput: {
     flex: 1,
     backgroundColor: "#27272a",
     color: "#fff",
     borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     fontSize: 13,
   },
   saveButton: {
     backgroundColor: "#db2777",
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingHorizontal: 12,
     borderRadius: 8,
     justifyContent: "center",
   },
-  saveButtonText: { color: "#fff", fontSize: 12, fontWeight: "600" },
+  saveButtonText: { color: "#fff", fontSize: 11, fontWeight: "600" },
   stats: { flexDirection: "row", gap: 12 },
-  stat: { color: "#71717a", fontSize: 12 },
+  stat: { color: "#71717a", fontSize: 11 },
   logoutButton: { alignSelf: "flex-end" },
-  logoutText: { color: "#f87171", fontSize: 13 },
+  logoutText: { color: "#f87171", fontSize: 12 },
   tabs: {
     flexDirection: "row",
     gap: 8,
@@ -385,30 +377,23 @@ const styles = StyleSheet.create({
   tabText: { color: "#a1a1aa", fontSize: 12, fontWeight: "600" },
   activeTabText: { color: "#fff" },
   content: { paddingHorizontal: 16, paddingBottom: 32 },
-  emptyText: {
-    color: "#71717a",
-    fontSize: 14,
-    textAlign: "center",
-    marginTop: 20,
+  grid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
   },
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   gridItem: {
     width: "48%",
     backgroundColor: "#18181b",
     borderRadius: 12,
+    marginBottom: 12,
     overflow: "hidden",
   },
-  gridImage: { width: "100%", height: 150 },
+  gridImage: { width: "100%", height: 160 },
   gridTitle: { color: "#fff", fontSize: 12, fontWeight: "600", padding: 8 },
   gridRating: {
     color: "#facc15",
-    fontSize: 11,
-    paddingHorizontal: 8,
-    paddingBottom: 8,
-  },
-  gridType: {
-    color: "#a1a1aa",
-    fontSize: 11,
+    fontSize: 10,
     paddingHorizontal: 8,
     paddingBottom: 8,
   },
@@ -421,10 +406,9 @@ const styles = StyleSheet.create({
   reviewHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center",
     marginBottom: 8,
   },
-  reviewRating: { color: "#facc15", fontSize: 13 },
+  reviewRating: { color: "#facc15", fontSize: 12 },
   reviewDate: { color: "#71717a", fontSize: 11 },
   reviewText: { color: "#a1a1aa", fontSize: 13 },
 });

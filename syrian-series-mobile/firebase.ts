@@ -1,5 +1,6 @@
-import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { getApp, getApps, initializeApp } from "firebase/app";
+import * as authModule from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -11,6 +12,19 @@ const firebaseConfig = {
   appId: "1:1052594174245:web:8d2fd5f894f664250342cc",
 };
 
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getFirestore(app);
+// 1. Initialize App
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+
+// 2. Initialize Auth
+// We use a double-cast here to tell TypeScript:
+// "Trust me, this function exists inside the auth module."
+const { initializeAuth, getReactNativePersistence } = authModule as any;
+
+const auth = initializeAuth(app, {
+  persistence: getReactNativePersistence(AsyncStorage),
+});
+
+// 3. Initialize Firestore
+const db = getFirestore(app);
+
+export { auth, db };

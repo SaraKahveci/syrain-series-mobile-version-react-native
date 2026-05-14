@@ -45,3 +45,9 @@ export async function searchContent(query: string) {
     movies: movies.results ?? [],
   };
 }
+export async function searchActors(query: string) {
+  const res = await fetch(
+    `${BASE_URL}/search/person?api_key=${API_KEY}&query=${encodeURIComponent(query)}&language=ar`,
+  );
+  return res.json();
+}
